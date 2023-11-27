@@ -1,4 +1,5 @@
 use ggml::{Buffer, ComputationGraph, Context, GraphExecutionPlan, Tensor};
+use llm_samplers::types::SamplerError;
 use serde::Serialize;
 use std::{cell::RefCell, fmt::Display, sync::Arc};
 use thiserror::Error;
@@ -8,8 +9,8 @@ use tracing::{instrument, log};
 use ggml::accelerator::metal::MetalContext;
 
 use crate::{
-    mulf, util, InferenceParameters, Model, ModelContext, ModelParameters, OutputRequest, Prompt,
-    TokenId, TokenUtf8Buffer, TokenizationError,
+    mulf, samplers::SamplingError, util, InferenceParameters, Model, ModelContext, ModelParameters,
+    OutputRequest, Prompt, TokenId, TokenUtf8Buffer, TokenizationError,
 };
 
 // The size of a scratch buffer used for inference. This is used for temporary
@@ -389,7 +390,7 @@ impl InferenceSession {
         let next_token = crate::samplers::sample_token(
             params.sampler.clone(),
             rng,
-            &self.tokens,
+            &mut self.tokens,
             self.last_logits.iter().copied(),
         )
         .map_err(InferenceError::SamplerFailure)?;
@@ -472,13 +473,23 @@ impl InferenceSession {
         // or we reach the specified limit.
         let mut tokens_processed = 0;
         let mut token_utf8_buf = TokenUtf8Buffer::new();
+        let mut sampling_interupted = 0;
+        const MAX_INTERRUPTS: usize = 10;
         while tokens_processed < maximum_token_count {
             let token = match self.infer_next_token(model, parameters, &mut Default::default(), rng)
             {
                 Ok(token) => token,
                 Err(InferenceError::EndOfText) => break,
+                Err(InferenceError::SamplerFailure(SamplingError::InternalSamplerInterrupt(e))) => {
+                    if sampling_interupted >= MAX_INTERRUPTS {
+                        return Err(InferenceError::MaxInterrupts(e));
+                    }
+                    sampling_interupted += 1;
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
+            sampling_interupted = 0;
 
             // Buffer the token until it's valid UTF-8, then call the callback.
             if let Some(tokens) = token_utf8_buf.push(&token) {
@@ -691,6 +702,9 @@ pub enum InferenceError {
     /// Sampling returned an error.
     #[error("token sampling failed")]
     SamplerFailure(crate::samplers::SamplingError),
+    /// We've hit the maximum number of interrupts
+    #[error("token sampling was interrupted during sampling")]
+    MaxInterrupts(SamplerError),
 }
 
 #[derive(Error, Debug)]

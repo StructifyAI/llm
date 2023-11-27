@@ -50,6 +50,10 @@ pub enum SamplingError {
     #[error("An internal error occured during sampling: {0}")]
     /// Sampling failed.
     InternalSamplingError(Box<dyn Error + Send + Sync + 'static>),
+
+    #[error("An internal error occured during sampling: {0}")]
+    /// Sampling interrupt.
+    InternalSamplerInterrupt(crate::samplers::SamplerError),
 }
 
 #[derive(Debug)]
@@ -59,7 +63,7 @@ pub enum SamplingError {
 /// to ensure a valid configuration.
 pub struct ConfiguredSamplers {
     /// A builder from the `llm-samplers` crate.
-    pub builder: SamplerChainBuilder,
+    pub builder: SamplerChainBuilder<usize, f32>,
     /// Mirostat 1 is present.
     pub mirostat1: bool,
     /// Mirostat 2 is present.
@@ -269,20 +273,19 @@ impl FromStr for ConfiguredSamplers {
 /// Sample a token. This convenience function handles building
 /// the sampler resources and logits objects the sampler needs.
 pub fn sample_token(
-    mut sampler: impl Sampler<TokenId, f32>,
+    mut sampler: impl Sampler,
     rng: &mut impl rand::Rng,
-    previous_tokens: &[TokenId],
+    previous_tokens: &mut Vec<TokenId>,
     last_logits: impl IntoIterator<Item = f32>,
 ) -> Result<TokenId, SamplingError> {
+    let resources = &mut SamplerResources {
+        previous_tokens,
+        rng,
+    };
+    sampler.sample_prepend(resources);
     Logits::try_from_iter(last_logits.into_iter())
         .map_err(|err| SamplingError::LogitsError(err.into()))?
-        .sample_token(
-            &mut SamplerResources {
-                previous_tokens,
-                rng,
-            },
-            &mut sampler,
-        )
+        .sample_token(resources, &mut sampler)
         .map_err(|err| SamplingError::InternalSamplingError(err.into()))?
         .ok_or_else(|| SamplingError::NoToken)
 }
@@ -297,7 +300,7 @@ pub fn build_sampler(
     n_vocab: usize,
     bias: &[(TokenId, f32)],
     args: &[impl AsRef<str>],
-) -> Result<Arc<Mutex<dyn Sampler<TokenId, f32>>>, SamplerConfigurationError> {
+) -> Result<Arc<Mutex<dyn Sampler>>, SamplerConfigurationError> {
     let mut samplers = SamplerChain::new();
 
     if !bias.is_empty() {
@@ -326,7 +329,7 @@ pub fn build_sampler(
 }
 
 /// Get the default sampler chain.
-pub fn default_samplers() -> Arc<Mutex<dyn Sampler<TokenId, f32>>> {
+pub fn default_samplers() -> Arc<Mutex<dyn Sampler>> {
     let mut result = ConfiguredSamplers::default();
     result.ensure_default_slots();
     Arc::new(Mutex::new(result.builder.into_chain()))
@@ -335,7 +338,7 @@ pub fn default_samplers() -> Arc<Mutex<dyn Sampler<TokenId, f32>>> {
 // Structure used to temporarily hold resources for the `llm-samplers`
 // sampler.
 struct SamplerResources<'pt, 'r> {
-    previous_tokens: &'pt [TokenId],
+    previous_tokens: &'pt mut Vec<TokenId>,
     rng: &'r mut dyn rand::RngCore,
 }
 
@@ -349,8 +352,6 @@ impl<'pt, 'r> fmt::Debug for SamplerResources<'pt, 'r> {
 }
 
 impl<'pt, 'r> HasSamplerResources for SamplerResources<'pt, 'r> {
-    type TokenId = TokenId;
-
     fn with_rng_mut(
         &mut self,
         fun: &mut dyn FnMut(&mut dyn rand::RngCore),
@@ -359,8 +360,16 @@ impl<'pt, 'r> HasSamplerResources for SamplerResources<'pt, 'r> {
         Ok(())
     }
 
-    fn with_last_tokens(&self, fun: &mut dyn FnMut(&[Self::TokenId])) -> Result<(), SamplerError> {
+    fn with_last_tokens(&self, fun: &mut dyn FnMut(&Vec<TID>)) -> Result<(), SamplerError> {
         fun(self.previous_tokens);
+        Ok(())
+    }
+
+    fn with_last_tokens_mut(
+        &mut self,
+        fun: &mut dyn FnMut(&mut Vec<TID>),
+    ) -> Result<(), SamplerError> {
+        fun(&mut self.previous_tokens);
         Ok(())
     }
 }
