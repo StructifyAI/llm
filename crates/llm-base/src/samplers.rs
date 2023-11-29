@@ -53,7 +53,7 @@ pub enum SamplingError {
 
     #[error("An internal error occured during sampling")]
     /// Sampling interrupt.
-    SamplingInterrupt((Vec<u32>, crate::samplers::SamplerError)),
+    SamplingInterrupt((Interruption, crate::samplers::SamplerError)),
 }
 
 #[derive(Debug)]

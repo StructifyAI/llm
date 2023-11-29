@@ -1,5 +1,5 @@
 use ggml::{Buffer, ComputationGraph, Context, GraphExecutionPlan, Tensor};
-use llm_samplers::types::SamplerError;
+use llm_samplers::types::{Interruption, SamplerError};
 use serde::Serialize;
 use std::{cell::RefCell, fmt::Display, sync::Arc};
 use thiserror::Error;
@@ -481,45 +481,56 @@ impl InferenceSession {
         let mut sampling_interupted = 0;
         const MAX_INTERRUPTS: usize = 10;
         while tokens_processed < maximum_token_count {
-            println!(
-                "Current String: '{}'",
-                String::from_utf8_lossy(&self.decoded_tokens)
-            );
             let token = match self.infer_next_token(model, parameters, &mut Default::default(), rng)
             {
                 Ok(token) => token,
                 Err(InferenceError::EndOfText) => break,
                 Err(InferenceError::SamplerFailure(SamplingError::SamplingInterrupt((
-                    replacement_tokens,
+                    interruption,
                     e,
                 )))) => {
                     if sampling_interupted >= MAX_INTERRUPTS {
                         return Err(InferenceError::MaxInterrupts(e));
                     }
+                    match interruption {
+                        Interruption::NewTokensGvien(new_tokens) => {
+                            let common_tokens = self
+                                .tokens
+                                .clone()
+                                .into_iter()
+                                .zip(new_tokens.clone())
+                                .take_while(|(a, b)| a == b)
+                                .map(|(a, _)| a)
+                                .collect::<Vec<_>>();
 
-                    let common_tokens = self
-                        .tokens
-                        .clone()
-                        .into_iter()
-                        .zip(replacement_tokens.clone())
-                        .take_while(|(a, b)| a == b)
-                        .map(|(a, _)| a)
-                        .collect::<Vec<_>>();
+                            let added_tokens = new_tokens[common_tokens.len()..].to_vec();
+                            let rewind_count = self.tokens.len() - common_tokens.len();
 
-                    let added_tokens = replacement_tokens[common_tokens.len()..].to_vec();
-                    let rewind_count = self.tokens.len() - common_tokens.len();
+                            self.rewind(model, rewind_count)
+                                .map_err(|e| InferenceError::RewindError(e))?;
 
-                    self.rewind(model, rewind_count)
-                        .map_err(|e| InferenceError::RewindError(e))?;
+                            self.feed_tokens(
+                                model,
+                                &added_tokens,
+                                output_request,
+                                feed_prompt_callback(&mut callback),
+                            )?;
 
-                    self.feed_tokens(
-                        model,
-                        &added_tokens,
-                        output_request,
-                        feed_prompt_callback(&mut callback),
-                    )?;
-
-                    continue;
+                            continue;
+                        }
+                        // Interruption::ToolCall(token) => {
+                        //     self.tokens.push(token.token_id);
+                        //     sampling_interupted += 1;
+                        //     let new_decoded = model.tokenizer().tokenize(vec![token.token_id], false);
+                        //     let new_decoded = unsafe { String::from_utf8_unchecked(new_decoded) };
+                        //     if let Err(e) = callback(InferenceResponse::InferredToken(
+                        //         new_decoded.as_bytes().to_vec(),
+                        //     )) {
+                        //         return Err(InferenceError::UserCallback(Box::new(e)));
+                        //     }
+                        //     break;
+                        // }
+                    };
                 }
                 Err(e) => return Err(e),
             };
