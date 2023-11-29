@@ -51,9 +51,9 @@ pub enum SamplingError {
     /// Sampling failed.
     InternalSamplingError(Box<dyn Error + Send + Sync + 'static>),
 
-    #[error("An internal error occured during sampling: {0}")]
+    #[error("An internal error occured during sampling")]
     /// Sampling interrupt.
-    InternalSamplerInterrupt(crate::samplers::SamplerError),
+    SamplingInterrupt((Vec<u32>, crate::samplers::SamplerError)),
 }
 
 #[derive(Debug)]
@@ -286,7 +286,12 @@ pub fn sample_token(
     Logits::try_from_iter(last_logits.into_iter())
         .map_err(|err| SamplingError::LogitsError(err.into()))?
         .sample_token(resources, &mut sampler)
-        .map_err(|err| SamplingError::InternalSamplingError(err.into()))?
+        .map_err(|err| match &err {
+            SamplerError::Interrupted(new_tokens) => {
+                SamplingError::SamplingInterrupt((new_tokens.clone(), err))
+            }
+            _ => SamplingError::InternalSamplingError(err.into()),
+        })?
         .ok_or_else(|| SamplingError::NoToken)
 }
 

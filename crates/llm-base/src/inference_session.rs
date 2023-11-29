@@ -294,7 +294,6 @@ impl InferenceSession {
             embedding_result: built_result.embedding_result.share(),
         }
     }
-
     /// Feed a prompt to the model for this session.
     #[instrument(skip_all)]
     pub fn feed_prompt<'a, E: std::error::Error + Send + Sync + 'static, P: Into<Prompt<'a>>>(
@@ -302,10 +301,9 @@ impl InferenceSession {
         model: &dyn Model,
         prompt: P,
         output_request: &mut OutputRequest,
-        mut callback: impl FnMut(&[u8]) -> Result<InferenceFeedback, E>,
+        callback: impl FnMut(&[u8]) -> Result<InferenceFeedback, E>,
     ) -> Result<(), InferenceError> {
         let beginning_of_sentence = self.n_past == 0;
-
         let vocab = model.tokenizer();
         let prompt_tokens = prompt.into().to_tokens(vocab, beginning_of_sentence)?;
 
@@ -313,7 +311,19 @@ impl InferenceSession {
             return Err(InferenceError::ContextFull);
         }
 
-        'outer: for batch in prompt_tokens.chunks(self.config.n_batch) {
+        self.feed_tokens(model, &prompt_tokens, output_request, callback)
+    }
+
+    /// Feed tokens to the model for this session.
+    #[instrument(skip_all)]
+    pub fn feed_tokens<E: std::error::Error + Send + Sync + 'static>(
+        &mut self,
+        model: &dyn Model,
+        tokens: &[TokenId],
+        output_request: &mut OutputRequest,
+        mut callback: impl FnMut(&[u8]) -> Result<InferenceFeedback, E>,
+    ) -> Result<(), InferenceError> {
+        'outer: for batch in tokens.chunks(self.config.n_batch) {
             model.evaluate(self, batch, output_request);
             for &tk in batch {
                 let should_call_callback = Some(tk) != model.bot_token_id();
@@ -326,8 +336,6 @@ impl InferenceSession {
                 };
 
                 if should_call_callback {
-                    // NOTE: No string ever tokenizes to the end of sentence. So we
-                    // can just return the id here.
                     match callback(&token) {
                         Err(e) => return Err(InferenceError::UserCallback(Box::new(e))),
                         Ok(f) => match f {
@@ -337,12 +345,11 @@ impl InferenceSession {
                     }
                 }
 
-                // Update the tokens for this session
                 self.tokens.push(tk);
                 self.decoded_tokens.append(&mut token);
             }
         }
-        log::trace!("Finished feed prompt");
+        log::trace!("Finished feed tokens");
 
         Ok(())
     }
@@ -392,8 +399,7 @@ impl InferenceSession {
             rng,
             &mut self.tokens,
             self.last_logits.iter().copied(),
-        )
-        .map_err(InferenceError::SamplerFailure)?;
+        )?;
 
         // Update the tokens for this session
         self.tokens.push(next_token);
@@ -466,7 +472,6 @@ impl InferenceSession {
         }
         stats.feed_prompt_duration = start_at.elapsed().unwrap();
         stats.prompt_tokens = self.n_past;
-
         // After the prompt is consumed, sample tokens by repeatedly calling
         // `infer_next_token`. We generate tokens until the model returns an
         // EndOfText token, or we run out of space in the context window,
@@ -476,15 +481,44 @@ impl InferenceSession {
         let mut sampling_interupted = 0;
         const MAX_INTERRUPTS: usize = 10;
         while tokens_processed < maximum_token_count {
+            println!(
+                "Current String: '{}'",
+                String::from_utf8_lossy(&self.decoded_tokens)
+            );
             let token = match self.infer_next_token(model, parameters, &mut Default::default(), rng)
             {
                 Ok(token) => token,
                 Err(InferenceError::EndOfText) => break,
-                Err(InferenceError::SamplerFailure(SamplingError::InternalSamplerInterrupt(e))) => {
+                Err(InferenceError::SamplerFailure(SamplingError::SamplingInterrupt((
+                    replacement_tokens,
+                    e,
+                )))) => {
                     if sampling_interupted >= MAX_INTERRUPTS {
                         return Err(InferenceError::MaxInterrupts(e));
                     }
-                    sampling_interupted += 1;
+
+                    let common_tokens = self
+                        .tokens
+                        .clone()
+                        .into_iter()
+                        .zip(replacement_tokens.clone())
+                        .take_while(|(a, b)| a == b)
+                        .map(|(a, _)| a)
+                        .collect::<Vec<_>>();
+
+                    let added_tokens = replacement_tokens[common_tokens.len()..].to_vec();
+                    let rewind_count = self.tokens.len() - common_tokens.len();
+
+                    self.rewind(model, rewind_count)
+                        .map_err(|e| InferenceError::RewindError(e))?;
+
+                    self.feed_tokens(
+                        model,
+                        &added_tokens,
+                        output_request,
+                        feed_prompt_callback(&mut callback),
+                    )?;
+
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -679,6 +713,7 @@ fn get_newly_decoded_portion(
         // Return an empty vector: no valid text was generated from this token.
         return vec![];
     }
+
     all_tokens.as_bytes()[decoded_tokens.len()..].to_vec()
 }
 
@@ -688,6 +723,9 @@ pub enum InferenceError {
     #[error("a tokenization-related failure occurred")]
     /// A tokenization-related failure occurred.
     TokenizationFailed(#[from] TokenizationError),
+    #[error("a rewind-related failure occurred")]
+    /// A tokenization-related failure occurred.
+    RewindError(#[from] RewindError),
     #[error("the context window is full")]
     /// The context window for the model is full.
     ContextFull,
@@ -700,11 +738,17 @@ pub enum InferenceError {
     /// The user-specified callback returned an error.
     UserCallback(Box<dyn std::error::Error + Send + Sync>),
     /// Sampling returned an error.
-    #[error("token sampling failed")]
+    #[error("token sampling failed: {0:?}")]
     SamplerFailure(crate::samplers::SamplingError),
     /// We've hit the maximum number of interrupts
     #[error("token sampling was interrupted during sampling")]
     MaxInterrupts(SamplerError),
+}
+
+impl From<SamplingError> for InferenceError {
+    fn from(e: SamplingError) -> Self {
+        InferenceError::SamplerFailure(e)
+    }
 }
 
 #[derive(Error, Debug)]
