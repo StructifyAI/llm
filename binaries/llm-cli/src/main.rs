@@ -109,6 +109,9 @@ fn infer(args: &cli_args::Infer) -> eyre::Result<()> {
             Err(llm::InferenceError::UserCallback(_)) | Err(llm::InferenceError::EndOfText) => {
                 unreachable!("cannot fail")
             }
+            Err(llm::InferenceError::RewindError(_) | llm::InferenceError::MaxInterrupts(_)) => {
+                unimplemented!()
+            }
         }
     });
 
