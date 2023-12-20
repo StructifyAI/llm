@@ -273,9 +273,6 @@ pub enum LoadError {
     /// The tokenizer could not be loaded.
     #[error("could not load tokenizer: {0}")]
     TokenizerLoadFail(#[from] TokenizerLoadError),
-    /// The quantization version was missing, despite this model containing quantized tensors.
-    #[error("quantization version was missing, despite model containing quantized tensors")]
-    MissingQuantizationVersion,
     /// The quantization version is not supported by this version of `llm`.
     #[error("quantization version {quantization_version:?} is not supported")]
     UnsupportedQuantizationVersion {
@@ -381,7 +378,12 @@ pub fn load(
     let architecture = gguf.metadata.get_str("general.architecture")?;
     let tokenizer = tokenizer_source.retrieve(&gguf)?;
 
-    let quantization_version = gguf.metadata.get_optional("general.quantization_version");
+    println!("{:?}", gguf.metadata.keys().collect::<Vec<_>>());
+    const DEFAULT_QUANTIZATION_VERSION: u32 = 2;
+    let quantization_version = gguf
+        .metadata
+        .get_optional("general.quantization_version")
+        .unwrap_or(&MetadataValue::UInt32(DEFAULT_QUANTIZATION_VERSION));
     tracing::trace!(
         "Determined quantization version of model as {:?}",
         quantization_version
@@ -394,15 +396,14 @@ pub fn load(
         .any(|t| t.element_type.is_quantized());
     if any_quantized {
         match quantization_version {
-            Some(MetadataValue::UInt32(2)) => {
+            MetadataValue::UInt32(2) => {
                 // Currently supported version
             }
-            Some(quantization_version) => {
+            quantization_version => {
                 return Err(LoadError::UnsupportedQuantizationVersion {
                     quantization_version: quantization_version.clone(),
                 })
             }
-            None => return Err(LoadError::MissingQuantizationVersion),
         }
     }
 
