@@ -375,8 +375,8 @@ impl<'pt, 'r> HasSamplerResources for SamplerResources<'pt, 'r> {
         Ok(())
     }
 
-    fn with_last_tokens(&self, fun: &mut dyn FnMut(&[TokenId])) -> Result<(), SamplerError> {
-        fun(self.previous_tokens);
+    fn with_last_tokens(&self, fun: &mut dyn FnMut(&Vec<TID>)) -> Result<(), SamplerError> {
+        fun(&self.previous_tokens.to_vec()); // HACK: This copies
         Ok(())
     }
 }

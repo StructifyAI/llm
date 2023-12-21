@@ -9,7 +9,7 @@ use std::{
 
 use llm::{InferenceSessionConfig, InferenceStats, TokenId};
 
-use llm_samplers::prelude::{HasSamplerResources, Logits, SampleFlatBias, SampleGreedy, Sampler};
+use llm_samplers::{prelude::{HasSamplerResources, Logits, SampleFlatBias, SampleGreedy, Sampler}, types::SamplerError};
 
 use crate::{ModelConfig, TestCaseReport, TestCaseReportInner, TestCaseReportMeta};
 
@@ -99,7 +99,7 @@ impl Sampler for DeterministicSampler {
         &mut self,
         res: &mut dyn HasSamplerResources,
         logits: &'a mut Logits,
-    ) -> anyhow::Result<&'a mut Logits> {
+    ) -> Result<&'a mut Logits, SamplerError> {
         let mut flat_bias = Default::default();
 
         // This might look a little weird, but it's necessary because the resource

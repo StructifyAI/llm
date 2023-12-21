@@ -378,7 +378,6 @@ pub fn load(
     let architecture = gguf.metadata.get_str("general.architecture")?;
     let tokenizer = tokenizer_source.retrieve(&gguf)?;
 
-    println!("{:?}", gguf.metadata.keys().collect::<Vec<_>>());
     const DEFAULT_QUANTIZATION_VERSION: u32 = 2;
     let quantization_version = gguf
         .metadata
