@@ -17,6 +17,7 @@ fn main() {
             "llama-cpp/k_quants.c",
             "llama-cpp/ggml-alloc.c",
         ])
+        // .define("LLAMA_DEBUG", Some("true"))
         .define("GGML_USE_K_QUANTS", None)
         .define("QK_K", Some("256"))
         .includes(["llama-cpp"]);
@@ -321,6 +322,8 @@ fn enable_cublas(build: &mut cc::Build, out_dir: &Path) {
                     .unwrap()
                     .join("cl.exe"),
             )
+            // .arg("-g") // Temporary include debug symbols
+            // .arg("-G") // Temporary include debug symbols
             .arg("-I")
             .arg(&include_path)
             .arg("-o")
